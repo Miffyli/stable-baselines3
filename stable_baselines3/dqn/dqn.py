@@ -73,6 +73,7 @@ class DQN(OffPolicyAlgorithm):
         exploration_fraction: float = 0.1,
         exploration_initial_eps: float = 1.0,
         exploration_final_eps: float = 0.05,
+        munchausen_dqn: bool = False,
         max_grad_norm: float = 10,
         tensorboard_log: Optional[str] = None,
         create_eval_env: bool = False,
@@ -111,6 +112,7 @@ class DQN(OffPolicyAlgorithm):
         self.exploration_final_eps = exploration_final_eps
         self.exploration_fraction = exploration_fraction
         self.target_update_interval = target_update_interval
+        self.munchausen_dqn = munchausen_dqn
         self.max_grad_norm = max_grad_norm
         # "epsilon" for the epsilon-greedy exploration
         self.exploration_rate = 0.0
@@ -155,12 +157,26 @@ class DQN(OffPolicyAlgorithm):
             with th.no_grad():
                 # Compute the target Q values
                 target_q = self.q_net_target(replay_data.next_observations)
-                # Follow greedy policy: use the one with the highest value
-                target_q, _ = target_q.max(dim=1)
-                # Avoid potential broadcast issue
-                target_q = target_q.reshape(-1, 1)
-                # 1-step TD target
-                target_q = replay_data.rewards + (1 - replay_data.dones) * self.gamma * target_q
+                if self.munchausen_dqn:
+                    # Hardcoded values tau/alpha from paper https://arxiv.org/pdf/2007.14430.pdf
+                    tau = 0.03
+                    alpha = 0.9
+                    l_0_clip = -1
+                    log_softmax_target_q = th.nn.functional.log_softmax(target_q / tau, dim=1)
+                    tau_log_softmax_target = th.clamp(tau * log_softmax_target_q, l_0_clip, 0)
+                    target_q = th.sum(th.exp(log_softmax_target_q) * (target_q - tau_log_softmax_target), dim=1)
+                    target_q = target_q.reshape(-1, 1)
+                    # 1-step TD target
+                    action_log_softmax_q = th.gather(tau_log_softmax_target, dim=1, index=replay_data.actions.long())
+                    target_q = replay_data.rewards + (alpha * action_log_softmax_q) * self.gamma * target_q
+                else:
+                    # Standard update
+                    # Follow greedy policy: use the one with the highest value
+                    target_q, _ = target_q.max(dim=1)
+                    # Avoid potential broadcast issue
+                    target_q = target_q.reshape(-1, 1)
+                    # 1-step TD target
+                    target_q = replay_data.rewards + (1 - replay_data.dones) * self.gamma * target_q
 
             # Get current Q estimates
             current_q = self.q_net(replay_data.observations)
